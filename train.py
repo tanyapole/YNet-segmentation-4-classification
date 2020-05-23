@@ -3,9 +3,7 @@ import time
 import pandas as pd
 import torch
 import torch.nn as nn
-from pathlib import Path
 from torch.backends import cudnn
-from tensorboardX import SummaryWriter
 from torch.optim import Adam
 
 from metrics import Metrics
@@ -38,11 +36,10 @@ def train(args, results: pd.DataFrame, SEED: int, train_type: str, epochs: int) 
 
     criterion = torch.nn.BCEWithLogitsLoss()
 
-    # writer = SummaryWriter()
     trn_dl, val_dl = make_loader(train_test_id, args, train_type=train_type, train='train', shuffle=True), \
                      make_loader(train_test_id, args, train_type=train_type, train='valid', shuffle=False)
     metrics = Metrics(args)
-    best_f1 = 0
+    best_jac = 0
 
     for ep in range(epochs):
         try:
@@ -57,24 +54,19 @@ def train(args, results: pd.DataFrame, SEED: int, train_type: str, epochs: int) 
 
                 image_batch = image_batch.to(device)
                 labels_batch = labels_batch.to(device)
-
-                if isinstance(args.attribute, str):
-                    labels_batch = torch.reshape(labels_batch, (-1, 1))
+                masks_batch = masks_batch.to(device)
 
                 optimizer.zero_grad()
                 if train_type == YNET:
-                    masks_batch = masks_batch.to(device)
-                    clsf_output, segm_output = model(image_batch)
-                    # print(clsf_output.shape, segm_output.shape, masks_batch.shape)
-                    loss2 = criterion(segm_output, masks_batch)
-                else:
                     clsf_output = model(image_batch)
-                    loss2 = torch.zeros(1).to(device)
-                loss1 = criterion(clsf_output, labels_batch)
-                loss = loss1 + loss2
+                    loss = criterion(clsf_output, labels_batch)
+                    metrics.train.update(labels_batch, clsf_output, loss)
+                else:
+                    segm_output = model(image_batch)
+                    loss = criterion(segm_output, masks_batch)
+                    metrics.train.update(masks_batch, segm_output, loss)
                 loss.backward()
                 optimizer.step()
-                metrics.train.update(labels_batch, clsf_output, loss, loss1, loss2)
             epoch_time = time.time() - start_time
             computed_metr = metrics.train.compute(ep, epoch_time)
             results = print_update(computed_metr, results, args, 'train', train_type)
@@ -87,28 +79,26 @@ def train(args, results: pd.DataFrame, SEED: int, train_type: str, epochs: int) 
                     image_batch = image_batch.to(device)
                     labels_batch = labels_batch.to(device)
                     if train_type == YNET:
-                        masks_batch = masks_batch.to(device)
-                        clsf_output, segm_output = model(image_batch)
-                        loss2 = criterion(segm_output, masks_batch)
-                    else:
                         clsf_output = model(image_batch)
-                        loss2 = torch.zeros(1).to(device)
-                    if isinstance(args.attribute, str):
-                        labels_batch = torch.reshape(labels_batch, (-1, 1))
-                    loss1 = criterion(clsf_output, labels_batch)
-                    loss = loss1 + loss2
-                    metrics.valid.update(labels_batch, clsf_output, loss, loss1, loss2)
+                        loss = criterion(clsf_output, labels_batch)
+                        metrics.train.update(labels_batch, clsf_output, loss)
+                    else:
+                        segm_output = model(image_batch)
+                        loss = criterion(segm_output, masks_batch)
+                        metrics.train.update(masks_batch, segm_output, loss)
+
+                    metrics.valid.update(labels_batch, clsf_output, loss)
             epoch_time = time.time() - start_time
             computed_metr = metrics.valid.compute(ep, epoch_time)
-            temp_f1 = computed_metr['f1_score']
+            temp_jac = computed_metr['jaccard']
             results = print_update(computed_metr, results, args, 'valid', train_type)
             metrics.valid.reset()
 
             if train_type == PRETRAIN:
-                if temp_f1 > best_f1:
+                if temp_jac > best_jac:
                     name = '{}model_{}.pt'.format(args.model_path, args.N)
                     save_weights(model, name, ep, optimizer)
-                    best_f1 = temp_f1
+                    best_jac = temp_jac
 
         except KeyboardInterrupt:
             return
